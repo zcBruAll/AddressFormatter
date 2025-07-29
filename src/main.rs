@@ -35,9 +35,9 @@ fn main() -> Result<(), Error> {
 
     for unstructured in unstructured_addresses {
         let structured: StructuredAddress = unstructured.clone().try_into()?;
-        println!("UNSTRUCTURED");
+        /*println!("UNSTRUCTURED");
         println!("{:#?}", unstructured);
-        println!("STRUCTURED");
+        */println!("STRUCTURED");
         println!("{:#?}", structured);
     }
 

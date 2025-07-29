@@ -1,8 +1,27 @@
 use std::convert::TryFrom;
 
 use anyhow::{Error, Ok};
+use regex::Regex;
+use lazy_static::lazy_static;
 
 use crate::db::SqlClient;
+
+lazy_static! {
+    static ref ZIP_RE: Regex = Regex::new(r"^(\d{4})(?:[-\s]?(\d{2}))?$")
+        .expect("invalid ZIP regex");
+    static ref HOUSE_RE: Regex = Regex::new(r"(?x)
+        ^\s*
+        (?P<street>.+?)               # 1: street name (minimal)
+        \s+
+        (?P<number>                   # 2: house number block
+            \d{1,4}                   #    1-4 digit base
+            (?:[\/\-\u00BD]\d+)?      #    optional '/n', '-n' or '½n' fractions
+            (?:[A-Za-z]{1,2})?        #    optional 1-2 letter suffix
+        )
+        \s*$
+    ").expect("invalid house-number regex");
+}
+
 
 #[derive(Debug, Clone)]
 pub struct UnstructuredAddress {
@@ -92,6 +111,37 @@ pub fn get_unstructured_addresses(
     Ok(out)
 }
 
+fn parse_zip(raw: &str) -> Option<PostalCode> {
+    // trim whitespace first
+    let raw = raw.trim();
+    ZIP_RE.captures(raw).map(|caps| {
+        let code_digits = caps.get(1).unwrap().as_str();
+        // parse “8001” → [8,0,0,1]
+        let mut code = [0u8; 4];
+        for (i, ch) in code_digits.chars().enumerate() {
+            code[i] = ch.to_digit(10).unwrap() as u8;
+        }
+        let suffix = caps.get(2).map(|m| {
+            let s = m.as_str();
+            let mut arr = [' '; 2];
+            for (i, ch) in s.chars().enumerate() {
+                arr[i] = ch;
+            }
+            arr
+        });
+        PostalCode { code, suffix }
+    })
+}
+
+fn parse_street_house(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+    HOUSE_RE.captures(raw).and_then(|caps| {
+        let street = caps.name("street")?.as_str().trim().to_string();
+        let number = caps.name("number")?.as_str().trim().to_string();
+        Some((street, number))
+    })
+}
+
 impl TryFrom<UnstructuredAddress> for StructuredAddress {
     type Error = Error;
 
@@ -103,27 +153,21 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
             .filter_map(|opt| opt)
             .collect();
 
+        println!("{lines:#?}");
+
         // Name parsing (line 0)
         let full_name = lines.get(0).cloned().unwrap_or_default();
+
+        // Approximative name parsing
         let mut name_parts = full_name.splitn(2, ' ');
         let lastname  = name_parts.next().unwrap_or("").to_string();
         let firstname = name_parts.next().unwrap_or("").to_string();
 
-        // Street & house number (line 1)
-        let (street, house_number) = if let Some(addr_line) = lines.get(1) {
-            // split on *last* space
-            if let Some(idx) = addr_line.rfind(' ') {
-                let (st, hn) = addr_line.split_at(idx);
-                (st.to_string(), hn.trim().to_string())
-            } else {
-                // no space found → entire thing is “street”, no house number
-                (addr_line.clone(), String::new())
-            }
-        } else {
-            (String::new(), String::new())
-        };
+        // after you’ve extracted the street line:
+        let street_line = lines.get(1).map(String::as_str).unwrap_or("");
+        let (street, house_number) = parse_street_house(street_line)
+        .unwrap_or_else(|| ("".into(), "".into()));
 
-        // Zip & city (line 2)
         let (zip_code, city) = if let Some(pc_line) = lines.get(2) {
             let mut parts = pc_line.splitn(2, ' ');
             let z = parts.next().unwrap_or("").to_string();
@@ -133,15 +177,9 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
             (String::new(), String::new())
         };
 
-        // Country (line 3)
-        let country = lines.get(3).cloned().unwrap_or_else(|| "CH".into());
+        let postal = parse_zip(&zip_code).unwrap_or(PostalCode { code: [0;4], suffix: None });
 
-        // Build the PostalCode type (very naively: first 4 digits, no suffix)
-        let mut code = [0u8; 4];
-        for (i, ch) in zip_code.chars().filter_map(|c| c.to_digit(10)).enumerate().take(4) {
-            code[i] = ch as u8;
-        }
-        let postal = PostalCode { code, suffix: None };
+        let country = lines.get(3).cloned().unwrap_or_else(|| "CH".into());
 
         // Wrap up into a StructuredAddress
         Ok(StructuredAddress {
