@@ -1,12 +1,18 @@
 mod db;
 mod file;
+mod address;
 
 use dotenv::dotenv;                         // Loads environment variables from a `.env` file at startup.
 use anyhow::Error;                          // A convenient error type that can represent any error (`?` will convert).
 use std::env;                               // Handles environment variables and arguments
 
 use db::SqlClient;
-use file::write_csv_record;
+use address::{
+    UnstructuredAddress,
+    StructuredAddress
+};
+
+use crate::address::get_unstructured_addresses;
 
 /// Maximum number of rows fetched per batch. Fetching in batches is more efficient than row-by-row.
 const BATCH_SIZE: usize = 200;
@@ -25,12 +31,15 @@ fn main() -> Result<(), Error> {
     // Initialize the SQL client
     let client = SqlClient::new(&server, &port, &name, &user, &pwd, BATCH_SIZE)?;
 
-    // Retrieve the result of the query with the header
-    let result = client.execute_query("SELECT TOP 15 * FROM FCF_NOTIFICATION", true)?;
+    let unstructured_addresses: Vec<UnstructuredAddress> = get_unstructured_addresses("FCF_DEMANDS", "TOP 5 IDDEMAND", &["RECEIVER1", "RECEIVER2", "RECEIVER3", "RECEIVER4", "RECEIVER5"], &client)?;
 
-    // Write result in CSV
-    write_csv_record("output.csv", result)?;
-    println!("Done! Results written to output.csv");
+    for unstructured in unstructured_addresses {
+        let structured: StructuredAddress = unstructured.clone().try_into()?;
+        println!("UNSTRUCTURED");
+        println!("{:#?}", unstructured);
+        println!("STRUCTURED");
+        println!("{:#?}", structured);
+    }
 
     // Return Ok if no error occured
     Ok(())
