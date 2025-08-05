@@ -31,14 +31,26 @@ fn main() -> Result<(), Error> {
     // Initialize the SQL client
     let client = SqlClient::new(&server, &port, &name, &user, &pwd, BATCH_SIZE)?;
 
-    let unstructured_addresses: Vec<UnstructuredAddress> = get_unstructured_addresses("FCF_DEMANDS", "TOP 5 IDDEMAND", &["RECEIVER1", "RECEIVER2", "RECEIVER3", "RECEIVER4", "RECEIVER5"], &client)?;
+    let unstructured_addresses: Vec<UnstructuredAddress> = get_unstructured_addresses(
+        "FCF_DEMANDS WHERE IDDEMAND = '1570'", 
+        "TOP 50 IDDEMAND", 
+        &[
+            "RECEIVER1", 
+            "RECEIVER2", 
+            "RECEIVER3", 
+            "RECEIVER4", 
+            "RECEIVER5"], 
+        &client
+    )?;
 
     for unstructured in unstructured_addresses {
         let structured: StructuredAddress = unstructured.clone().try_into()?;
         /*println!("UNSTRUCTURED");
         println!("{:#?}", unstructured);
-        */println!("STRUCTURED");
-        println!("{:#?}", structured);
+        println!("STRUCTURED");
+        println!("{:#?}", structured);*/
+
+
     }
 
     // Return Ok if no error occured

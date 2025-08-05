@@ -7,19 +7,39 @@ use lazy_static::lazy_static;
 use crate::db::SqlClient;
 
 lazy_static! {
+    static ref TITLE_RE: Regex = Regex::new(r"(?i)^\s*(?P<title>FRAU|HERR|MADAME|MONSIEUR|MR|MS|M|MME)\s*$")
+        .expect("Invalid title regex");
+
     static ref ZIP_RE: Regex = Regex::new(r"^(\d{4})(?:[-\s]?(\d{2}))?$")
         .expect("invalid ZIP regex");
-    static ref HOUSE_RE: Regex = Regex::new(r"(?x)
+    static ref HOUSE_RE: Regex = Regex::new(r"(?ix) # i = case-insensitive, x = extended
         ^\s*
-        (?P<street>.+?)               # 1: street name (minimal)
-        \s+
-        (?P<number>                   # 2: house number block
-            \d{1,4}                   #    1-4 digit base
-            (?:[\/\-\u00BD]\d+)?      #    optional '/n', '-n' or '½n' fractions
-            (?:[A-Za-z]{1,2})?        #    optional 1-2 letter suffix
+        (?P<street>.+?)                         # 1: street name
+        \s*
+        (?P<number>                             # 2: house number block
+            [1-9]\d{0,3}                        # main number: 1-9999
+            (?:
+                (?:(?:bis|ter|quater|quinquies) # optional Latin suffix
+                |[A-Za-z]                       # or single letter suffix
+                )
+            )?
+            (?:\/[1-9]\d{0,3})?                 # optional “/apartment” (1-9999)
         )
         \s*$
-    ").expect("invalid house-number regex");
+        ").expect("invalid house-number regex");
+
+    static ref POSTAL_BOX_RE: Regex = Regex::new(r"(?ix)
+        ^\s*
+        (?:P\.O\.\s*Box
+          |Postfach
+          |Case\s+Postale
+          |Casella\s+Postale
+          |CP
+        )
+        \s+
+        (\d{1,4})
+        \s*$
+        ").expect("Invalid postal box regex");
 }
 
 
@@ -31,8 +51,8 @@ pub struct UnstructuredAddress {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PostalCode {
-    pub code:   [u8; 4],
-    pub suffix: Option<[char; 2]>,
+    pub code:   u16,
+    pub suffix: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -111,37 +131,6 @@ pub fn get_unstructured_addresses(
     Ok(out)
 }
 
-fn parse_zip(raw: &str) -> Option<PostalCode> {
-    // trim whitespace first
-    let raw = raw.trim();
-    ZIP_RE.captures(raw).map(|caps| {
-        let code_digits = caps.get(1).unwrap().as_str();
-        // parse “8001” → [8,0,0,1]
-        let mut code = [0u8; 4];
-        for (i, ch) in code_digits.chars().enumerate() {
-            code[i] = ch.to_digit(10).unwrap() as u8;
-        }
-        let suffix = caps.get(2).map(|m| {
-            let s = m.as_str();
-            let mut arr = [' '; 2];
-            for (i, ch) in s.chars().enumerate() {
-                arr[i] = ch;
-            }
-            arr
-        });
-        PostalCode { code, suffix }
-    })
-}
-
-fn parse_street_house(raw: &str) -> Option<(String, String)> {
-    let raw = raw.trim();
-    HOUSE_RE.captures(raw).and_then(|caps| {
-        let street = caps.name("street")?.as_str().trim().to_string();
-        let number = caps.name("number")?.as_str().trim().to_string();
-        Some((street, number))
-    })
-}
-
 impl TryFrom<UnstructuredAddress> for StructuredAddress {
     type Error = Error;
 
@@ -153,22 +142,74 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
             .filter_map(|opt| opt)
             .collect();
 
-        println!("{lines:#?}");
+        let mut line_offset = 0;
+        let mut title: String = "".to_owned();
+
+        if let Some(first_line) = lines.get(0) {
+            if let Some(caps) = TITLE_RE.captures(first_line) {
+                title = caps.name("title").unwrap().as_str().to_owned();
+                line_offset += 1;
+            }
+        }
 
         // Name parsing (line 0)
-        let full_name = lines.get(0).cloned().unwrap_or_default();
+        let full_name = lines.get(0 + line_offset).cloned().unwrap_or_default();
 
         // Approximative name parsing
         let mut name_parts = full_name.splitn(2, ' ');
-        let lastname  = name_parts.next().unwrap_or("").to_string();
-        let firstname = name_parts.next().unwrap_or("").to_string();
+        let lastname: String;
+        let firstname: String;
+        if let Some(caps) = TITLE_RE.captures(name_parts.clone().next().unwrap_or("")) {
+            title = caps.name("title").unwrap().as_str().to_owned();
+            let mut real_name_parts = name_parts.next().unwrap_or("").splitn(2, ' ');
+            lastname  = real_name_parts.next().unwrap_or("").to_string();
+            firstname = real_name_parts.next().unwrap_or("").to_string();
+        } else {
+            lastname  = name_parts.next().unwrap_or("").to_string();
+            firstname = name_parts.next().unwrap_or("").to_string();
+        }
 
+        let mut compl1: String = "".to_owned();
+        let mut compl2: String = "".to_owned();
+        let mut street_or_pobox: String = "".to_owned();
+        let mut address: AddressLine = AddressLine::Street { street: "".to_owned(), house_number: "".to_owned() };
+        let mut postal: PostalCode = PostalCode { code: 0, suffix: None };
+        let mut city: String = "".to_owned();
+
+        let mut idx = 1 + line_offset;
+        while let Some(line) = lines.get(idx) {
+            idx += 1;
+
+            let mut locality_parts = line.splitn(2, ' ');
+
+            if street_or_pobox.is_empty() && let Some(caps) = POSTAL_BOX_RE.captures(line) {
+                street_or_pobox = caps.get(0).unwrap().as_str().trim().to_string();
+                address = AddressLine::PoBox { box_number: street_or_pobox.clone() };
+            } else if street_or_pobox.is_empty() && let Some(caps) = HOUSE_RE.captures(line) {
+                street_or_pobox = caps.name("street").unwrap().as_str().trim().to_string();
+                let house_number = caps.name("number").unwrap().as_str().trim().to_string();
+
+                address = AddressLine::Street { street: street_or_pobox.clone(), house_number: house_number };
+            } else if city.is_empty() && let Some(caps) = ZIP_RE.captures(locality_parts.next().unwrap()) {
+                let code = caps.get(1).unwrap().as_str().parse().unwrap();
+        
+                let suffix = caps.get(2).map(|m| m.as_str().parse::<u8>().unwrap());
+                postal = PostalCode { code, suffix };
+
+                city = locality_parts.next().unwrap_or("").to_owned();
+            } else if compl1.is_empty() {
+                compl1 = line.to_string();
+            } else if compl2.is_empty() {
+                compl2 = line.to_string();
+            }
+        }
+        /*
         // after you’ve extracted the street line:
-        let street_line = lines.get(1).map(String::as_str).unwrap_or("");
+        let street_line = lines.get(1 + line_offset).map(String::as_str).unwrap_or("");
         let (street, house_number) = parse_street_house(street_line)
         .unwrap_or_else(|| ("".into(), "".into()));
 
-        let (zip_code, city) = if let Some(pc_line) = lines.get(2) {
+        let (zip_code, city) = if let Some(pc_line) = lines.get(2 + line_offset) {
             let mut parts = pc_line.splitn(2, ' ');
             let z = parts.next().unwrap_or("").to_string();
             let c = parts.next().unwrap_or("").to_string();
@@ -177,20 +218,27 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
             (String::new(), String::new())
         };
 
-        let postal = parse_zip(&zip_code).unwrap_or(PostalCode { code: [0;4], suffix: None });
+        let postal = parse_zip(&zip_code).unwrap_or(PostalCode { code: 0, suffix: None });
+        */
 
-        let country = lines.get(3).cloned().unwrap_or_else(|| "CH".into());
+        let country = lines.get(3 + line_offset).cloned().unwrap_or_else(|| "CH".into());
+
+        /*println!("title:'{}'", title);
+        println!("name:'{lastname} {firstname}'");
+        println!("{:#?}", address);
+        println!("compl1:'{}'", compl1);
+        println!("postal:'{:04} - {:02}' - city:'{}'", postal.code, postal.suffix.unwrap_or_default(), city);*/
 
         // Wrap up into a StructuredAddress
         Ok(StructuredAddress {
-            id:        raw.id,            // carry over the raw ID
-            title:     None,              // no title parsing yet
-            name:      Some(full_name),   
+            id:        raw.id,
+            title:     Some(title),
+            name:      Some("{lastname} {firstname}".to_owned()),   
             lastname:  Some(lastname),
             firstname: Some(firstname),
-            compl1:    None,              // skipping complement lines for now
-            compl2:    None,
-            address:   AddressLine::Street { street, house_number },
+            compl1:    Some(compl1),
+            compl2:    Some(compl2),
+            address,
             postal,
             city,
             country,
