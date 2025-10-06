@@ -4,7 +4,7 @@ use anyhow::{Error, Ok};
 use regex::Regex;
 use lazy_static::lazy_static;
 
-use crate::db::SqlClient;
+use crate::db::{SqlClient, n_opt, sql_quote};
 
 lazy_static! {
     static ref TITLE_RE: Regex = Regex::new(r"(?i)^\s*(?P<title>FRAU|HERR|MADAME|MONSIEUR|MR|MS|M|MME)\s*$")
@@ -131,6 +131,108 @@ pub fn get_unstructured_addresses(
     Ok(out)
 }
 
+pub fn save_structured_address(
+    table: &str,
+    addr: &StructuredAddress,
+    client: &SqlClient,
+) -> anyhow::Result<u64> {
+    let (street, house_number, po_box) = match &addr.address {
+        AddressLine::Street { street, house_number } => {
+            (Some(street.as_str()), Some(house_number.as_str()), None)
+        }
+        AddressLine::PoBox { box_number } => {
+            (None, None, Some(box_number.as_str()))
+        }
+    };
+
+    let postal_code = addr.postal.code;
+    let postal_suffix = addr.postal.suffix.map(|s| s.to_string());
+
+    println!("{:?}", &addr);
+
+    let sql = format!(
+        "INSERT INTO {table} \
+        (ID_FPR_PAYREL, FPR_PAYEMENT_DOMAIN, FPR_ACCOUNT_OWNER_NAME, \
+        FPR_ACCOUNT_OWNER_ADRESS_LINE1, FPR_ACCOUNT_OWNER_ADRESS_LINE2, \
+        FPR_STREET, FPR_BUILDING_NUMBER, FPR_POST_CODE, FPR_TOWN_NAME, \
+        FPR_ACCOUNT_OWNER_ADDRESS_COUNTRY, FPR_ACCOUNT_TYPE, FPR_ACCOUNT_NO, \
+        FPR_CURRENCY, FPR_PAYMENT_POOL, FPR_ACCOUNT_NO_REF, FPR_VALIDITY_START, \
+        FPR_VALIDITY_END, FPR_STATE, FPR_SOURCE, FPR_VALID, FPR_USR_LOG_I, \
+        FPR_DTE_LOG_I, FPR_USR_LOG_U, FPR_DTE_LOG_U, OLD_TBL_ID, OLD_ID_ADRESSE, \
+        RIP_PERSON_ID, RIP_PERSON_BPC_ID, PAC_PAYEMENT_ADRESS_ID, PAC_VERSION_ADR)
+        {id_fpr_payrel}, '{fpr_payment_domain}', '{fpr_account_owner_name}', \
+        '{fpr_account_owner_address_line1}', '{fpr_account_owner_address_line2}', \
+        '{fpr_street}', '{fpr_building_number}', {fpr_post_code}, '{fpr_town_name}', \
+        '{fpr_account_owner_address_country}', '{fpr_account_type}', '{fpr_account_no}', \
+        '{fpr_currency}', {fpr_payment_pool}, '{fpr_account_no_ref}', {fpr_validity_start}, \
+        {fpr_validity_end}, '{fpr_state}', '{fpr_source}', {fpr_valid}, '{fpr_usr_log_i}', \
+        {fpr_dte_log_i}, '{fpr_usr_log_u}', {fpr_dte_log_u}, {old_tbl_id}, {old_id_address}, \
+        {rip_person_id}, {rip_person_bpc_id}, {pac_payment_address_id}, {pac_version_adr} \
+        FROM {table} AS t",
+        table       = table,
+        id_fpr_payrel = "SELECT ISNULL(MAX(t.ID_FPR_PAYREL),0)+1",
+
+        fpr_payment_domain              = "FCF".to_string(),//n_opt(fpr_payment_domain.as_deref()),
+        fpr_account_owner_name          = n_opt(addr.name.as_deref()),
+        fpr_account_owner_address_line1 = n_opt(addr.compl1.as_deref()),
+        fpr_account_owner_address_line2 = n_opt(addr.compl2.as_deref()),
+        fpr_street                      = n_opt(street.as_deref()),
+        fpr_building_number             = n_opt(house_number.as_deref()),
+        fpr_town_name                   = n_opt(Some(&addr.city)),
+        fpr_account_owner_address_country = n_opt(Some(&addr.country)),
+        fpr_account_type                = "TRAN_CH",//n_opt(fpr_account_type.as_deref()),
+        fpr_account_no                  = "CH00",//n_opt(fpr_account_no.as_deref()),
+        fpr_currency                    = "CHF",//n_opt(fpr_currency.as_deref()),
+        fpr_account_no_ref              = "NULL",//n_opt(fpr_account_no_ref.as_deref()),
+        fpr_state                       = "ACTIVE",//n_req(&fpr_state),     // NOT NULL (<=10 chars)
+        fpr_source                      = "OTH",//n_opt(fpr_source.as_deref()),
+        fpr_usr_log_i                   = "FORMAT",//n_req(&fpr_usr_log_i), // NOT NULL (<=15 chars)
+        fpr_usr_log_u                   = "FORMAT",//n_req(&fpr_usr_log_u), // NOT NULL (<=15 chars)
+
+        fpr_post_code         = postal_code,//num_opt(fpr_post_code),
+        fpr_payment_pool      = 0,//num_opt(fpr_payment_pool),
+        fpr_valid             = 1,//num_opt(fpr_valid),
+        old_tbl_id            = addr.id,//num_opt(old_tbl_id),
+        old_id_address        = "NULL",//num_opt(old_id_address),
+        rip_person_id         = 0,//num_opt(rip_person_id),
+        rip_person_bpc_id     = 0,//num_opt(rip_person_bpc_id),
+        pac_payment_address_id= "NULL",//num_opt(pac_payment_address_id),
+        pac_version_adr       = "NULL",//num_opt(pac_version_adr),
+    
+        fpr_dte_log_i     = "GETDATE()",//date_opt(Some(&fpr_dte_log_i)),
+        fpr_dte_log_u     = "GETDATE()",//date_opt(Some(&fpr_dte_log_u)),
+        fpr_validity_start= "GETDATE()",//date_opt(Some(&fpr_validity_start)),
+        fpr_validity_end  = "NULL",//date_opt(fpr_validity_end.as_deref()),
+    );
+
+    println!("{}", &sql);
+
+    client.execute_non_query(&sql).map_err(Into::into)
+}
+
+pub fn update_addr_pay_id(
+    table: &str,
+    id_field: &str,
+    id_ref_field: &str,
+    ref_table: &str,
+    ref_id_field: &str,
+    ref_link_field: &str,
+    ref_main_id: &str,
+    client: &SqlClient) -> anyhow::Result<u64> {
+
+    let sql = format!(
+        "UPDATE {table} \
+        SET {id_ref_field} = ( \
+            SELECT ad.{ref_id_field} \
+            FROM {ref_table} ad \
+            WHERE ad.{ref_link_field} = '{ref_main_id}' \
+        ) \
+        WHERE {id_field} = '{ref_main_id}'"
+    );
+
+    client.execute_non_query(&sql).map_err(Into::into)
+}
+
 impl TryFrom<UnstructuredAddress> for StructuredAddress {
     type Error = Error;
 
@@ -140,14 +242,15 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
             .lines
             .into_iter()
             .filter_map(|opt| opt)
+            .filter(|s| !s.is_empty())
             .collect();
 
         let mut line_offset = 0;
-        let mut title: String = "".to_owned();
+        let mut title: String = String::new();
 
         if let Some(first_line) = lines.get(0) {
-            if let Some(caps) = TITLE_RE.captures(first_line) {
-                title = caps.name("title").unwrap().as_str().to_owned();
+            if TITLE_RE.is_match(first_line) {
+                title = first_line.to_string();
                 line_offset += 1;
             }
         }
@@ -155,19 +258,25 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
         // Name parsing (line 0)
         let full_name = lines.get(0 + line_offset).cloned().unwrap_or_default();
 
-        // Approximative name parsing
-        let mut name_parts = full_name.splitn(2, ' ');
-        let lastname: String;
-        let firstname: String;
-        if let Some(caps) = TITLE_RE.captures(name_parts.clone().next().unwrap_or("")) {
-            title = caps.name("title").unwrap().as_str().to_owned();
-            let mut real_name_parts = name_parts.next().unwrap_or("").splitn(2, ' ');
-            lastname  = real_name_parts.next().unwrap_or("").to_string();
-            firstname = real_name_parts.next().unwrap_or("").to_string();
+        // Split name and handle possible inline title
+        let mut parts = full_name.split_whitespace();
+        let first_token = parts.next().unwrap_or("");
+
+        // Check if the first token is a title
+        let (lastname, firstname) = if TITLE_RE.is_match(first_token) {
+            // Only overwrite title if not already set by separate line
+            if title.is_empty() {
+                title = first_token.to_string();
+            }
+
+            let last = parts.next().unwrap_or("").to_string();
+            let first = parts.next().unwrap_or("").to_string();
+            (last, first)
         } else {
-            lastname  = name_parts.next().unwrap_or("").to_string();
-            firstname = name_parts.next().unwrap_or("").to_string();
-        }
+            let last = first_token.to_string();
+            let first = parts.next().unwrap_or("").to_string();
+            (last, first)
+        };
 
         let mut compl1: String = "".to_owned();
         let mut compl2: String = "".to_owned();
@@ -199,8 +308,10 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
                 city = locality_parts.next().unwrap_or("").to_owned();
             } else if compl1.is_empty() {
                 compl1 = line.to_string();
+                line_offset += 1;
             } else if compl2.is_empty() {
                 compl2 = line.to_string();
+                line_offset += 1;
             }
         }
         /*
@@ -233,7 +344,7 @@ impl TryFrom<UnstructuredAddress> for StructuredAddress {
         Ok(StructuredAddress {
             id:        raw.id,
             title:     Some(title),
-            name:      Some("{lastname} {firstname}".to_owned()),   
+            name: Some(format!("{} {}", lastname, firstname)),
             lastname:  Some(lastname),
             firstname: Some(firstname),
             compl1:    Some(compl1),

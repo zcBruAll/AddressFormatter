@@ -9,10 +9,11 @@ use std::env;                               // Handles environment variables and
 use db::SqlClient;
 use address::{
     UnstructuredAddress,
-    StructuredAddress
+    StructuredAddress,
+    get_unstructured_addresses, 
+    save_structured_address,
+    update_addr_pay_id
 };
-
-use crate::address::get_unstructured_addresses;
 
 /// Maximum number of rows fetched per batch. Fetching in batches is more efficient than row-by-row.
 const BATCH_SIZE: usize = 200;
@@ -32,8 +33,8 @@ fn main() -> Result<(), Error> {
     let client = SqlClient::new(&server, &port, &name, &user, &pwd, BATCH_SIZE)?;
 
     let unstructured_addresses: Vec<UnstructuredAddress> = get_unstructured_addresses(
-        "FCF_DEMANDS WHERE IDDEMAND = '1570'", 
-        "TOP 50 IDDEMAND", 
+        "FCF_DEMANDS", 
+        "TOP 15 IDDEMAND", 
         &[
             "RECEIVER1", 
             "RECEIVER2", 
@@ -43,14 +44,38 @@ fn main() -> Result<(), Error> {
         &client
     )?;
 
+    let table = "Addresses_TEMP";
+    client.ensure_address_table(table.to_string())?;
+    println!("Table {table} existence ensured");
+    
+    // client.ensure_pay_addr_id_field(pay_addr_id_table, pay_addr_id_field)?;
+
     for unstructured in unstructured_addresses {
         let structured: StructuredAddress = unstructured.clone().try_into()?;
-        /*println!("UNSTRUCTURED");
+        println!("Address structured");
+
+        /*
+        println!("UNSTRUCTURED");
         println!("{:#?}", unstructured);
         println!("STRUCTURED");
-        println!("{:#?}", structured);*/
+        println!("{:#?}", structured);
+        */
+        println!("{:#?}", structured);
 
+        save_structured_address(table, &structured, &client)?;
+        println!("Address saved in DB");
 
+        let to_upd_table = "FCF_TEMP_DEMANDS";
+        let id_upd_table = "IDDEMAND";
+        let to_upd_field = "PAY_ADDR_ID";
+        let ref_table = "Addresses_TEMP";
+        let ref_id = "ID_FPR_PAYREL";
+        let ref_id_link_field = "OLD_TBL_ID";
+        update_addr_pay_id(to_upd_table, id_upd_table, 
+            to_upd_field, ref_table, 
+            ref_id, ref_id_link_field, 
+            &structured.id, &client)?;
+        println!("Link updated in DB");
     }
 
     // Return Ok if no error occured
