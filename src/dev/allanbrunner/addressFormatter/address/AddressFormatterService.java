@@ -2,6 +2,7 @@ package dev.allanbrunner.addressFormatter.address;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -9,12 +10,26 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import dev.allanbrunner.addressFormatter.db.SqlClient;
+import dev.allanbrunner.addressFormatter.db.TableSql;
+import dev.allanbrunner.addressFormatter.db.table.AddressLinkTable;
+import dev.allanbrunner.addressFormatter.db.table.AddressRawTable;
+import dev.allanbrunner.addressFormatter.db.table.AddressRefTable;
+import dev.allanbrunner.addressFormatter.db.table.Column;
 
 public final class AddressFormatterService {
 	private static final Pattern TITLE_RE = Pattern.compile("(?i)^\\s*(FRAU|HERR|MADAME|MONSIEUR|MR|MS|M|MME)\\s*$");
 	private static final Pattern ZIP_RE = Pattern.compile("^(\\d{4})(?:[-\\s]?(\\d{2}))?$");
-	private static final Pattern HOUSE_RE = Pattern.compile(
-			"(?ix)^\\s*(?<street>.+?)\\s*(?<number>[1-9]\\d{0,3}(?:(?:(?:bis|ter|quater|quinquies)|[A-Za-z]))?(?:/[1-9]\\d{0,3})?)\\s*$");
+	private static final Pattern HOUSE_RE = Pattern.compile("(?ix)^\\s*(?<street>.+?)\\s*"
+			+ "(?<number>[1-9]\\d{0,3}(?:\\s*(?:(?:bis|ter|quater|quinquies)|[A-Za-z]))?(?:/[1-9]\\d{0,3})?)\\s*$");
+	private static final Pattern STREET_ONLY_RE = Pattern.compile("(?iu)^\\s*(?<street>" +
+	// FR prefixes
+			"(?:rue|route|rte|chemin|chem|ch|avenue|av|boulevard|bd|quai|place|pl|allée|allee|impasse|passage|promenade|sentier)\\.?\\s+[\\p{L}'’.-]+(?:\\s+[\\p{L}'’.-]+)*"
+			+ "|" +
+			// DE suffixes
+			"[\\p{L}'’.-]+(?:\\s+[\\p{L}'’.-]+)*\\s+(?:strasse|str\\.?|gasse|weg|platz|allee|ufer|ring|quai|promenade)"
+			+ "|" +
+			// IT prefixes
+			"(?:via|viale|vicolo|piazza|largo|salita|corso)\\.?\\s+[\\p{L}'’.-]+(?:\\s+[\\p{L}'’.-]+)*" + ")\\s*$");
 	private static final Pattern POSTAL_BOX_RE = Pattern
 			.compile("(?ix)^\\s*(?:P\\.O\\.\\s*Box|Postfach|Case\\s+Postale|Casella\\s+Postale|CP)\\s+(\\d{1,4})\\s*$");
 
@@ -43,6 +58,28 @@ public final class AddressFormatterService {
 				lines[i] = clean(row.get(i + 1));
 			}
 			result.add(new UnstructuredAddress(id, lines));
+		}
+		return result;
+	}
+
+	public static List<UnstructuredAddress> getUnstructuredAddresses(AddressRawTable rawTable, SqlClient client)
+			throws SQLException {
+		List<List<String>> rows = client.executeQuery(TableSql.selectTable(rawTable), false);
+		List<UnstructuredAddress> result = new ArrayList<>(rows.size());
+		for (List<String> row : rows) {
+			String id = Objects.requireNonNull(row.get(0), "No ID retrieved").trim();
+			boolean hasIban = rawTable.findColumn("iban") != null;
+			boolean hasAccountOwner = rawTable.findColumn("accountOwner") != null;
+			String iban = hasIban ? row.get(1) : "";
+			String accountOwner = hasAccountOwner ? row.get(2) : "";
+			String[] lines = new String[6];
+			Arrays.fill(lines, "");
+			Integer dx = 0 + (hasIban ? 1 : 0) + (hasAccountOwner ? 1 : 0);
+			for (int i = 0; i < row.size() - 1 - dx; i++) {
+				lines[i] = clean(row.get(i + 1 + dx));
+			}
+
+			result.add(new UnstructuredAddress(id, lines, iban, accountOwner));
 		}
 		return result;
 	}
@@ -91,24 +128,6 @@ public final class AddressFormatterService {
 			String[] localityParts = trimmed.split("\\s+", 2);
 			String localityFirst = localityParts.length > 0 ? localityParts[0] : "";
 
-			if (streetOrPoBox == null) {
-				Matcher poBoxMatcher = POSTAL_BOX_RE.matcher(trimmed);
-				if (poBoxMatcher.matches()) {
-					streetOrPoBox = trimmed;
-					address = AddressLine.poBox(trimmed);
-					continue;
-				}
-
-				Matcher hosueMatcher = HOUSE_RE.matcher(trimmed);
-				if (hosueMatcher.matches()) {
-					String street = hosueMatcher.group("street").trim();
-					String houseNumber = hosueMatcher.group("number").trim();
-					streetOrPoBox = street;
-					address = AddressLine.street(street, houseNumber);
-					continue;
-				}
-			}
-
 			if (city.isEmpty()) {
 				Matcher zipMatcher = ZIP_RE.matcher(localityFirst);
 				if (zipMatcher.matches()) {
@@ -117,6 +136,32 @@ public final class AddressFormatterService {
 					postal = new PostalCode(code, suffix);
 					city = localityParts.length > 1 ? localityParts[1].trim() : "";
 					continue;
+				}
+			}
+
+			if (streetOrPoBox == null) {
+				Matcher poBoxMatcher = POSTAL_BOX_RE.matcher(trimmed);
+				if (poBoxMatcher.matches()) {
+					streetOrPoBox = trimmed;
+					address = AddressLine.poBox(trimmed);
+					continue;
+				}
+
+				Matcher houseMatcher = HOUSE_RE.matcher(trimmed);
+				if (houseMatcher.matches()) {
+					String street = houseMatcher.group("street").trim();
+					String houseNumber = houseMatcher.group("number").trim();
+					streetOrPoBox = street;
+					address = AddressLine.street(street, houseNumber);
+					continue;
+				} else {
+					Matcher onlyStreetMatcher = STREET_ONLY_RE.matcher(trimmed);
+					if (onlyStreetMatcher.matches()) {
+						String street = trimmed;
+						streetOrPoBox = street;
+						address = AddressLine.street(street, "");
+						continue;
+					}
 				}
 			}
 
@@ -149,112 +194,29 @@ public final class AddressFormatterService {
 		String cityValue = city == null ? "" : city;
 
 		return new StructuredAddress(raw.id(), titleValue, nameValue, lastnameValue, firstnameValue, compl1Value,
-				compl2Value, address, postal, cityValue, country);
+				compl2Value, address, postal, cityValue, country, raw.iban(), raw.accountOwner());
 	}
 
-	public static long saveStructuredAddress(String table, StructuredAddress addr, SqlClient client)
-			throws SQLException {
-		String street = null;
-		String houseNumber = null;
-		String poBox = null;
-		if (addr.address() instanceof AddressLine.Street streetLine) {
-			street = streetLine.street();
-			houseNumber = streetLine.houseNumber();
-		} else if (addr.address() instanceof AddressLine.PoBox poBoxLine) {
-			poBox = poBoxLine.boxNumber();
-		}
-
-		String nextIdExpr = "(SELECT ISNULL(MAX(t.ID_FPR_PAYREL), 0)+1 FROM " + table + " t)";
-
-		String sql = ("""
-					INSERT INTO %s (
-				                ID_FPR_PAYREL,
-				                FPR_PAYEMENT_DOMAIN,
-				                FPR_ACCOUNT_OWNER_NAME,
-				                FPR_ACCOUNT_OWNER_ADRESS_LINE1,
-				                FPR_ACCOUNT_OWNER_ADRESS_LINE2,
-				                FPR_STREET,
-				                FPR_BUILDING_NUMBER,
-				                FPR_POST_CODE,
-				                FPR_TOWN_NAME,
-				                FPR_ACCOUNT_OWNER_ADDRESS_COUNTRY,
-				                FPR_ACCOUNT_TYPE,
-				                FPR_ACCOUNT_NO,
-				                FPR_CURRENCY,
-				                FPR_PAYMENT_POOL,
-				                FPR_ACCOUNT_NO_REF,
-				                FPR_VALIDITY_START,
-				                FPR_VALIDITY_END,
-				                FPR_STATE,
-				                FPR_SOURCE,
-				                FPR_VALID,
-				                FPR_USR_LOG_I,
-				                FPR_DTE_LOG_I,
-				                FPR_USR_LOG_U,
-				                FPR_DTE_LOG_U,
-				                OLD_TBL_ID,
-				                OLD_ID_ADRESSE,
-				                RIP_PERSON_ID,
-				                RIP_PERSON_BPC_ID,
-				                PAC_PAYEMENT_ADRESS_ID,
-				                PAC_VERSION_ADR
-				            )
-				            SELECT
-				                %s,
-				                'FCF',
-				                %s,
-				                %s,
-				                %s,
-				                %s,
-				                %s,
-				                %s,
-				                %s,
-				                %s,
-				                'TRAN_CH',
-				                'CH00',
-				                'CHF',
-				                0,
-				                NULL,
-				                GETDATE(),
-				                NULL,
-				                'ACTIVE',
-				                'OTH',
-				                1,
-				                'FORMAT',
-				                GETDATE(),
-				                'FORMAT',
-				                GETDATE(),
-				                %s,
-				                NULL,
-				                0,
-				                0,
-				                NULL,
-				                NULL
-				""").formatted(table, nextIdExpr, SqlClient.nullableQuoted(addr.name()),
-				SqlClient.nullableQuoted(addr.compl1()), SqlClient.nullableQuoted(addr.compl2()),
-				SqlClient.nullableQuoted(poBox != null ? poBox : street), SqlClient.nullableQuoted(houseNumber),
-				addr.postal().code(), SqlClient.nullableQuoted(addr.city()), SqlClient.nullableQuoted(addr.country()),
-				SqlClient.nullableQuoted(addr.id()));
-		try {
-			return client.executeNonQuery(sql);
-		} catch (Exception e) {
-			System.out.println("An error happened: " + e + "\nRequest: " + sql);
-			return -1;
-		}
-	}
-
-	public static long updateAddrPayId(String table, String idField, String idRefField, String refTable,
-			String refIdField, String refLinkField, String refMainId, SqlClient client) throws SQLException {
+	public static long updateAddrPayId(AddressLinkTable linkTable, AddressRefTable refTable, String refMainId,
+			SqlClient client) throws SQLException {
+		Column colOldId = refTable.findColumn("oldId");
+		Column colIdOriginal = linkTable.findColumn("idOriginal");
 		String sql = ("""
 				UPDATE %s
 				SET %s = (
-					SELECT ad.%s
-					FROM %s ad
-					WHERE ad.%s = '%s'
+					SELECT t.%s
+					FROM %s t
+					WHERE t.%s = %s
 				)
-				WHERE %s = '%s'
-				""").formatted(table, idRefField, refIdField, refTable, refLinkField, SqlClient.sqlQuote(refMainId),
-				idField, SqlClient.sqlQuote(refMainId));
+				WHERE %s = %s
+				""").formatted(linkTable.name(), linkTable.findColumn("idReferenced").dbName(),
+				refTable.findColumn("id").dbName(), refTable.name(), refTable.findColumn("oldId").dbName(),
+				colOldId.type().renderAsLiteral() ? SqlClient.nullableQuoted(refMainId)
+						: SqlClient.nullableRaw(refMainId),
+				colIdOriginal.dbName(), colIdOriginal.type().renderAsLiteral() ? SqlClient.nullableQuoted(refMainId)
+						: SqlClient.nullableRaw(refMainId));
+
+		// System.out.println("NEW UPDATE QUERY:\n" + sql);
 		return client.executeNonQuery(sql);
 	}
 

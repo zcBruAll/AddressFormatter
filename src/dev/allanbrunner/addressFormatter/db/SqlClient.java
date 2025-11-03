@@ -66,45 +66,6 @@ public final class SqlClient implements AutoCloseable {
 		}
 	}
 
-	public long ensureAddressTable(String table) throws SQLException {
-		String sql = """
-				IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='%s' AND xtype='U')
-				CREATE TABLE %s (
-					ID_FPR_PAYREL decimal(20,0) NOT NULL,
-					FPR_PAYEMENT_DOMAIN nvarchar(20) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_OWNER_NAME nvarchar(70) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_OWNER_ADRESS_LINE1 nvarchar(70) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_OWNER_ADRESS_LINE2 nvarchar(70) COLLATE French_CI_AS NULL,
-					FPR_STREET nvarchar(32) COLLATE French_CI_AS NULL,
-					FPR_BUILDING_NUMBER nvarchar(11) COLLATE French_CI_AS NULL,
-					FPR_POST_CODE decimal(6,0) NULL,
-					FPR_TOWN_NAME nvarchar(29) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_OWNER_ADDRESS_COUNTRY nvarchar(2) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_TYPE nvarchar(10) COLLATE French_CI_AS NULL,
-					FPR_ACCOUNT_NO nvarchar(40) COLLATE French_CI_AS NULL,
-					FPR_CURRENCY nvarchar(3) COLLATE French_CI_AS NULL,
-					FPR_PAYMENT_POOL decimal(1,0) NULL,
-					FPR_ACCOUNT_NO_REF nvarchar(30) COLLATE French_CI_AS NULL,
-					FPR_VALIDITY_START date NOT NULL,
-					FPR_VALIDITY_END date NULL,
-					FPR_STATE nvarchar(10) COLLATE French_CI_AS NOT NULL,
-					FPR_SOURCE nvarchar(10) COLLATE French_CI_AS NULL,
-					FPR_VALID decimal(1,0) NULL,
-					FPR_USR_LOG_I nvarchar(15) COLLATE French_CI_AS NOT NULL,
-					FPR_DTE_LOG_I date NOT NULL,
-					FPR_USR_LOG_U nvarchar(15) COLLATE French_CI_AS NOT NULL,
-					FPR_DTE_LOG_U date NOT NULL,
-					OLD_TBL_ID varchar(64) NULL,
-					OLD_ID_ADRESSE decimal(15,0) NULL,
-					RIP_PERSON_ID decimal(10,0) NULL,
-					RIP_PERSON_BPC_ID decimal(10,0) NULL,
-					PAC_PAYEMENT_ADRESS_ID decimal(10,0) NULL,
-					PAC_VERSION_ADR decimal(4,0) NULL
-				)
-				""".formatted(table, table);
-		return executeNonQuery(sql);
-	}
-
 	public static String sqlQuote(String value) { return value.replace("'", "''"); }
 
 	public static String nullableQuoted(String value) {
